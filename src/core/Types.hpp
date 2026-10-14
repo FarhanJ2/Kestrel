@@ -32,5 +32,5 @@ struct MotorState {
 struct Command {
     Mode _mode = Mode::NEUTRAL;
     double duty_cycle = 0.0;
-    double setpoint = 0.0;
+    double setpoint_mps = 0.0;
 };
