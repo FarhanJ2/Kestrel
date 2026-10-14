@@ -4,6 +4,7 @@
 .vscode/
 .zed/
 build/
+.cache/
 compile_commands.json
 Dockerfile
 compose.yaml

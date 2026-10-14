@@ -12,9 +12,3 @@ services:
     network_mode: host
     cap_add:
       - NET_ADMIN
-    # Game controller input, including hotplug
-    volumes:
-      - /dev/input:/dev/input
-      - /run/udev:/run/udev:ro
-    device_cgroup_rules:
-      - "c 13:* rmw"

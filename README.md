@@ -1,58 +1,139 @@
 # Kestrel
 
-Phoenix 6 robot program for a Raspberry Pi (64-bit Raspberry Pi OS). Phoenix 6 for non-FRC targets is Linux-only, so on macOS everything (build, IntelliSense, test runs) happens inside Docker.
+A friction-drive e-bike conversion controlled by a Raspberry Pi running CTRE Phoenix 6 in C++.
 
-# Developing (macOS, Zed)
+## Overview
 
-1. Start Docker Desktop.
-2. Open this folder in Zed and choose **Open in Dev Container** (or run `project: open remote` → Dev Container).
+Kestrel drives a single FRC Falcon 500 (integrated Talon FX) against the rear tire of an ordinary bicycle through a friction roller. A Raspberry Pi commands the motor over CAN using the Phoenix 6 C++ API on plain Linux, with no roboRIO.
 
-The dev container is built from the `dev` stage of the `Dockerfile`. On creation it runs CMake, which writes `build/compile_commands.json`; clangd runs inside the container and picks it up automatically, so Phoenix 6, SDL2 and the Linux system headers all resolve.
+## How it works
+
+### Hardware
+
+| Part | Choice |
+| --- | --- |
+| Motor and controller | FRC Falcon 500 (integrated Talon FX) |
+| Drive | Friction roller on the rear tire |
+| Computer | Raspberry Pi (64-bit OS) |
+| CAN interface | CANable USB adapter, via SocketCAN |
+| Motor library | CTRE Phoenix 6, C++ (non-FRC Linux) |
+| Rider inputs | Throttle, brake switch, cadence sensor |
+
+### Control loop
+
+`main` runs a fixed-rate loop with a 20 ms period. Each iteration runs this pipeline:
+
+```mermaid
+flowchart LR
+    A[Read inputs] --> B[Update state]
+    B --> C[Compute command]
+    C --> D[Safety gate]
+    D --> E[Write motor]
+    E --> F[Log]
+```
+
+- **State** is one of `Boot`, `Ready`, `Assist` or `Fault`.
+- **The safety gate always runs last**, so nothing reaches the motor without passing through it. It applies: brake cutoff, fault cutoff, a power cap (under 750 W), and a speed cap (15 mph in NYC, 20 mph elsewhere).
+- **Watchdog:** Phoenix 6 outside FRC only drives a motor while the program keeps feeding its enable signal. The loop feeds it every iteration, so if the program hangs or crashes the motor goes neutral when the enable times out.
+
+`ControlLoop` handles the timing: it passes the measured time since the previous iteration to the tick function, counts and reports overruns, and returns on `SIGINT` or `SIGTERM` so the motor can be commanded to neutral before exit.
+
+The logic is split so it can be tested without the bike. `src/core` holds the state machine and safety gate as pure functions of their inputs with no hardware access or clock reads, and builds as the `kestrel_core` library with no dependency on Phoenix. `src/hw` wraps Phoenix 6 and the sensors.
+
+## Repo structure
+
+```
+src/
+  main.cpp          entry point; runs the control loop
+  ControlLoop.*     fixed-rate loop: timing, overrun reporting, clean shutdown
+  Config.hpp        tunable constants: CAN IDs, pins, gearing, limits
+  Logger.*          per-iteration logging
+  core/             pure logic, built as kestrel_core
+    Types.hpp       InputState, MotorState, Command
+    Controller.*    state machine and assist logic
+    Safety.*        safety gate
+  hw/               hardware access
+    Inputs.*        throttle, brake, cadence
+    Motor.*         Talon FX wrapper
+tests/              GoogleTest unit tests for kestrel_core
+Dockerfile          dev, build and runtime images (Debian Bookworm, arm64)
+.devcontainer/      dev container definition
+build.sh            one-shot build inside the dev image, run from the host
+compose.yaml        runs the runtime image on the Pi
+generic_socketcan_start.sh   brings up a SocketCAN interface
+```
+
+Source files are globbed by CMake with `CONFIGURE_DEPENDS`, so adding or removing a `.cpp` needs no `CMakeLists.txt` edit.
+
+## Building
+
+Phoenix 6 for non-FRC targets is Linux-only, so development on macOS happens in an arm64 Debian Bookworm container that matches the Pi. The container is for compiling, IntelliSense and unit tests only. It cannot reach the CAN adapter; anything involving hardware runs on the Pi.
+
+### Dev container
+
+1. Start Docker.
+2. Open the repo in Zed (or any editor with dev container support) and reopen it in the dev container.
+
+The container is the `dev` stage of the `Dockerfile` (compiler, CMake, GoogleTest, clangd, gdb). On creation it runs the CMake configure step, which writes `build/compile_commands.json` for clangd.
+
+### Configure, build, test
 
 Inside the container:
 
 ```sh
-cmake --build build -j   # build
-./build/Kestrel          # run
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug   # only needed once, or after deleting build/
+cmake --build build -j
+ctest --test-dir build
 ```
 
-After changing `CMakeLists.txt` or adding source files, re-run `cmake -S . -B build`.
+This builds three targets: `kestrel_core` (library), `Kestrel` (the program) and `kestrel_tests`.
 
-To build without opening the editor, run `./build.sh [Debug|Release]` on the host. It uses the same image and the same `build/` directory as the dev container.
+From the host, `./build.sh [Debug|Release]` does the configure and build steps in the same image and the same `build/` directory.
 
-# Deploying to the Raspberry Pi
+CI (`.github/workflows/build.yml`) builds the `runtime` image on an arm64 runner on every push. That image build compiles in Release and runs the unit tests.
 
-The `runtime` stage of the `Dockerfile` is a minimal image containing only the Release binary and its libraries. With Docker installed on the Pi:
+### Raspberry Pi setup
+
+Install Phoenix 6 from CTR Electronics' APT repository, plus the build tools:
 
 ```sh
-git clone <this repo> && cd Kestrel
-docker compose up -d --build   # build and start; restarts on boot and on crash
-docker compose logs -f         # watch output
+sudo curl -s --compressed -o /usr/share/keyrings/ctr-pubkey.gpg "https://deb.ctr-electronics.com/ctr-pubkey.gpg"
+sudo curl -s --compressed -o /etc/apt/sources.list.d/ctr2026.list "https://deb.ctr-electronics.com/ctr2026.list"
+sudo apt update
+sudo apt install phoenix6 cmake build-essential libgtest-dev
 ```
 
-`compose.yaml` runs the container on the host network (SocketCAN interfaces are only visible there) and passes through `/dev/input` for the game controller.
-
-- If using a CANivore, [install canivore-usb](https://v6.docs.ctr-electronics.com/en/stable/docs/installation/installation-nonfrc.html#canivore-installation) on the Pi itself; it is a kernel module and cannot live in the container.
-- Alternatively, build the image on an arm64 Mac and copy it over: `docker build --target runtime -t kestrel . && docker save kestrel | ssh <pi> docker load`, then `docker compose up -d` on the Pi.
-
-## Running without Docker
-
-On any supported Debian/Ubuntu system: [install Phoenix 6](https://v6.docs.ctr-electronics.com/en/stable/docs/installation/installation-nonfrc.html) using the C++ (Linux) instructions, `sudo apt install cmake build-essential libsdl2-dev`, then:
+Build:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+```
+
+Bring up the CAN interface, then run. With a generic SocketCAN adapter such as the CANable, the interface has to be started manually (1 Mbit/s, `can0` by default):
+
+```sh
+./generic_socketcan_start.sh        # or: ./generic_socketcan_start.sh can1
 ./build/Kestrel
 ```
 
-# Modifying the Robot Program
+See the [Phoenix 6 non-FRC installation guide](https://v6.docs.ctr-electronics.com/en/stable/docs/installation/installation-nonfrc.html) for system requirements.
 
-The main robot program is located inside main.cpp.
+## Roadmap
 
-By default, the GameController class is used for controller input. Users may choose to use the Joystick class instead.
+- [ ] Pedal assist via cadence sensor
+- [ ] Physics-based auto-assist (IMU grade + speed)
+- [ ] GPS speed-cap geofencing
+- [ ] Ride logging
+- [ ] LiFePO4 battery upgrade
+- [ ] Optional planetary gearbox and larger roller
 
-## Setting up Generic SocketCAN Adapters
+## Safety and legal
 
-When the canivore-usb kernel module is installed (required when using CANivore), **all** SocketCAN adapters will be automatically configured and started by the robot program.
+This is an experimental, home-built vehicle project, not a tested or certified design. Build or ride anything based on it at your own risk.
 
-However, if it is not installed, then SocketCAN adapters must be manually brought up before running the robot program using `./generic_socketcan_start.sh [CAN interface (default: can0)]`.
+Nothing in this repo is legal advice. The limits Kestrel is designed around come from New York e-bike rules as the author understands them: motor power under 750 W, and a 15 mph speed cap in New York City. Check the current law where you ride.
+
+## Credits
+
+Based on [CrossTheRoadElec/Phoenix6-Linux-Example](https://github.com/CrossTheRoadElec/Phoenix6-Linux-Example).

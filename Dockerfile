@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 #
 # Stages:
-#   base      - Debian + Phoenix 6 + SDL2 runtime libraries
+#   base      - Debian + Phoenix 6 runtime libraries
 #   toolchain - base + compiler, CMake and development headers
-#   build     - compiles a Release binary from the sources in this repo
+#   build     - compiles a Release binary and runs the unit tests
 #   runtime   - minimal image that runs the robot program (deploy this to the Pi)
 #   dev       - toolchain + clangd/gdb/git, used by the dev container (default target)
 #
@@ -23,14 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL --compressed -o /etc/apt/sources.list.d/ctr${CTR_YEAR}.list \
         "https://deb.ctr-electronics.com/ctr${CTR_YEAR}.list" \
     && apt-get update && apt-get install -y --no-install-recommends \
-        phoenix6 libsdl2-2.0-0 libatomic1 iproute2 \
+        phoenix6 libatomic1 iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 
 FROM base AS toolchain
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake libsdl2-dev \
+        build-essential cmake libgtest-dev \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -39,16 +39,13 @@ FROM toolchain AS build
 WORKDIR /src
 COPY . .
 RUN cmake -S . -B /out -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /out -j"$(nproc)"
+    && cmake --build /out -j"$(nproc)" \
+    && ctest --test-dir /out --output-on-failure
 
 
 FROM base AS runtime
 
 COPY --from=build /out/Kestrel /usr/local/bin/Kestrel
-
-# No display or audio on the robot; SDL is only used for controller input
-ENV SDL_VIDEODRIVER=dummy \
-    SDL_AUDIODRIVER=dummy
 
 CMD ["Kestrel"]
 
