@@ -1,0 +1,20 @@
+# Production deployment on the Raspberry Pi: docker compose up -d --build
+services:
+  kestrel:
+    build:
+      context: .
+      target: runtime
+    image: kestrel:latest
+    restart: unless-stopped
+    # Reap/forward signals so `docker compose stop` shuts down immediately
+    init: true
+    # SocketCAN interfaces (including CANivore) live in the host network namespace
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    # Game controller input, including hotplug
+    volumes:
+      - /dev/input:/dev/input
+      - /run/udev:/run/udev:ro
+    device_cgroup_rules:
+      - "c 13:* rmw"

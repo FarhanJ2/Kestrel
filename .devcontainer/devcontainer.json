@@ -1,0 +1,10 @@
+{
+  "name": "Kestrel",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "dev"
+  },
+  // Generates build/compile_commands.json, which clangd picks up automatically
+  "postCreateCommand": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug"
+}
